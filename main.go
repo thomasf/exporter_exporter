@@ -23,6 +23,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -49,7 +50,7 @@ var (
 	tlsAddr  = flag.String("web.tls.listen-address", "", "The address to listen on for HTTPS requests.")
 
 	tPath = flag.String("web.telemetry-path", "/metrics", "The address to listen on for HTTP requests.")
-	mPath = flag.String("web.proxy-path", "/proxy", "The address to listen on for HTTP requests.")
+	pPath = flag.String("web.proxy-path", "/proxy", "The address to listen on for HTTP requests.")
 
 	proxyDuration = prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{
@@ -140,8 +141,14 @@ func main() {
 		}
 	}
 
-	http.HandleFunc("/proxy", cfg.doProxy)
-	http.Handle("/metrics", promhttp.Handler())
+	proxyPath := path.Clean("/" + *pPath)
+	telePath := path.Clean("/" + *tPath)
+	if proxyPath == telePath {
+		glog.Fatalf("flags -web.proxy-path and -web.telemetry-path can not be set to the same value: %s", proxyPath)
+	}
+
+	http.HandleFunc(proxyPath, cfg.doProxy)
+	http.Handle(telePath, promhttp.Handler())
 
 	eg, ctx := errgroup.WithContext(context.Background())
 
