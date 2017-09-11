@@ -203,10 +203,6 @@ cfgDirs:
 		bToken = t
 	}
 
-	http.HandleFunc("/proxy", cfg.doProxy)
-	http.Handle("/metrics", promhttp.Handler())
->>>>>>> bearer-token
-
 	var handler http.Handler
 	if bToken == "" {
 		handler = http.DefaultServeMux
