@@ -23,7 +23,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/davecgh/go-spew/spew"
 	"golang.org/x/net/context/ctxhttp"
+
+	"io/ioutil"
 
 	"github.com/golang/glog"
 	"github.com/prometheus/client_golang/prometheus"
@@ -137,5 +140,26 @@ func (b BearerAuthMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		_, _ = w.Write([]byte("Invalid Bearer Token"))
 		return
 	}
+
 	b.Handler.ServeHTTP(w, r)
+}
+
+// debugHandler .
+type debugHandler struct {
+	http.Handler
+}
+
+func (d *debugHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	glog.Errorln(r.Host, r.RequestURI, r.URL, r.Method)
+	glog.Errorln("h", r.Host)
+	if r.Host == "node:0" {
+		spew.Dump(r.Header, r.TLS)
+		req, _ := ioutil.ReadAll(r.Body)
+		spew.Dump(req)
+		http.Redirect(w, r, "https://localhost:9999/metrics", http.StatusTemporaryRedirect)
+	}
+	// return
+
+	d.Handler.ServeHTTP(w, r)
+
 }

@@ -31,9 +31,12 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"net"
+
 	"github.com/golang/glog"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/valyala/fasthttp/fasthttputil"
 )
 
 var (
@@ -101,6 +104,7 @@ func init() {
 }
 
 func main() {
+
 	flag.Parse()
 	if *printVersion {
 		fmt.Fprintf(os.Stderr, "Version: %s\n", versionStr())
@@ -175,6 +179,8 @@ cfgDirs:
 
 	http.HandleFunc(proxyPath, cfg.doProxy)
 	http.Handle(telePath, promhttp.Handler())
+	http.HandleFunc("/", cfg.doProxy)
+
 	var bToken string
 	if *bearerToken != "" {
 		bToken = *bearerToken
@@ -209,6 +215,7 @@ cfgDirs:
 	} else {
 		handler = &BearerAuthMiddleware{http.DefaultServeMux, bToken}
 	}
+	handler = &debugHandler{handler}
 
 	eg, ctx := errgroup.WithContext(context.Background())
 
@@ -222,41 +229,47 @@ cfgDirs:
 			return http.ListenAndServe(*addr, handler)
 		})
 	}
-
 	if *tlsAddr != "" {
+		ln := fasthttputil.NewInmemoryListener()
+
+		go socksp(ln)
+
 		eg.Go(func() error {
-			cert, err := tls.LoadX509KeyPair(*certPath, *keyPath)
+
+			tlsConfig, err := loadTlsConfig(*verify)
 			if err != nil {
-				glog.Fatalf("Could not parse key/cert, " + err.Error())
-			}
-
-			cabs, err := ioutil.ReadFile(*caPath)
-			if err != nil {
-				glog.Fatalf("Could not open ca file,, " + err.Error())
-			}
-			pool := x509.NewCertPool()
-			ok := pool.AppendCertsFromPEM(cabs)
-			if !ok {
-				glog.Fatalf("Failed loading ca certs")
-			}
-
-			tlsConfig := tls.Config{
-				Certificates: []tls.Certificate{cert},
-				RootCAs:      pool,
-			}
-			tlsConfig.BuildNameToCertificate()
-
-			if *verify {
-				tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
-				tlsConfig.ClientCAs = pool
+				return err
 			}
 
 			srvr := http.Server{
 				Addr:      *tlsAddr,
-				TLSConfig: &tlsConfig,
+				TLSConfig: tlsConfig,
 				Handler:   handler,
 			}
+
+			return srvr.ServeTLS(ln, *certPath, *keyPath)
+
+			// return nil;
+		})
+	}
+
+	if *tlsAddr != "" {
+		eg.Go(func() error {
+			tlsConfig, err := loadTlsConfig(*verify)
+			if err != nil {
+				return err
+			}
+
+			srvr := http.Server{
+				Addr:      *tlsAddr,
+				TLSConfig: tlsConfig,
+				Handler:   handler,
+			}
+
 			return srvr.ListenAndServeTLS(*certPath, *keyPath)
+
+			// return srvr.ListenAndServeTLS(*certPath, *keyPath)
+
 		})
 	}
 
@@ -264,14 +277,55 @@ cfgDirs:
 	log.Fatal(ctx.Err())
 }
 
-func (cfg *config) doProxy(w http.ResponseWriter, r *http.Request) {
-	mod, ok := r.URL.Query()["module"]
+func loadTlsConfig(verify bool) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(*certPath, *keyPath)
+	if err != nil {
+		glog.Fatalf("Could not parse key/cert, " + err.Error())
+	}
+
+	cabs, err := ioutil.ReadFile(*caPath)
+	if err != nil {
+		glog.Fatalf("Could not open ca file,, " + err.Error())
+	}
+	pool := x509.NewCertPool()
+	ok := pool.AppendCertsFromPEM(cabs)
 	if !ok {
-		if glog.V(1) {
-			glog.Infof("no module given")
+		glog.Fatalf("Failed loading ca certs")
+	}
+
+	tlsConfig := tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      pool,
+	}
+	tlsConfig.BuildNameToCertificate()
+
+	if verify {
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		tlsConfig.ClientCAs = pool
+	}
+	return &tlsConfig, nil
+}
+
+func (cfg *config) doProxy(w http.ResponseWriter, r *http.Request) {
+	glog.Errorln("h", r.Host)
+	var mod string
+	modq, ok := r.URL.Query()["module"]
+	if !ok {
+		h, p, err := net.SplitHostPort(r.Host)
+		if err == nil {
+			mod = h
+			_ = p
 		}
-		http.Error(w, fmt.Sprintf("require parameter module is missing%v\n", mod), http.StatusBadRequest)
+		if mod == "" {
+			if glog.V(1) {
+				glog.Infof("no module given")
+			}
+			http.Error(w, fmt.Sprintf("require parameter module is missing%v\n", mod), http.StatusBadRequest)
+		}
 		return
+	}
+	if mod == "" {
+		mod= modq[0]
 	}
 
 	if glog.V(3) {
@@ -279,7 +333,7 @@ func (cfg *config) doProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var h http.Handler
-	if m, ok := cfg.Modules[mod[0]]; !ok {
+	if m, ok := cfg.Modules[mod]; !ok {
 		proxyErrorCount.WithLabelValues("unknown").Inc()
 		if glog.V(1) {
 			glog.Infof("unknown module requested  %v\n", mod)
@@ -287,7 +341,7 @@ func (cfg *config) doProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("unknown module %v\n", mod), http.StatusNotFound)
 		return
 	} else {
-		m.name = mod[0]
+		m.name = mod
 		h = m
 	}
 
